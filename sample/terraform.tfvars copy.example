@@ -1,0 +1,780 @@
+# Configuración de ejemplo para el módulo de Datadog Monitors
+#
+# PC-IAC-026: Configuración declarativa sin valores hardcodeados
+# Los valores dinámicos se inyectan en locals.tf
+
+# ============================================================================
+# Variables de Gobernanza
+# ============================================================================
+
+client      = "pragma"
+project     = "ecommerce"
+environment = "dev"
+
+# ============================================================================
+# Configuración de Monitors
+# ============================================================================
+
+monitors_config = {
+  # Monitor de errores de Lambda
+  "lambda-errors" = {
+    # El nombre completo se construye en locals.tf (PC-IAC-025)
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "metric alert"
+    query = "avg(last_5m):sum:aws.lambda.errors{environment:dev} by {functionname} > 5"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      🚨 **ALERT**: Lambda Errors Critical
+      {{/is_alert}}
+      {{#is_warning}}
+      ⚠️ **WARNING**: Lambda Errors High
+      {{/is_warning}}
+      {{#is_recovery}}
+      ✅ **RECOVERED**: Lambda Errors Normal
+      {{/is_recovery}}
+      
+      **Function**: {{functionname.name}}
+      **Error Count**: {{value}}
+      **Environment**: dev
+      
+      @slack-aws-alarms-pragma-proyectos-internos
+    EOT
+    
+    thresholds = {
+      critical = 5
+      warning  = 2
+    }
+    
+    renotify_interval   = 60
+    require_full_window = false
+    priority            = 1
+    on_missing_data     = "show_and_notify_no_data"
+    
+    additional_tags = [
+      "service:lambda",
+      "severity:critical",
+      "metric:errors",
+      "team:backend"
+    ]
+  }
+  
+  # ============================================================================
+  # Monitors de RDS
+  # ============================================================================
+  
+  # Monitor de CPU de RDS
+  "rds-cpu-high" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "metric alert"
+    query = "avg(last_5m):avg:aws.rds.cpuutilization{env:*} by {dbinstanceidentifier,engine,aws_account,env} > 85"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      🚨 **CRÍTICO**: CPU alta en RDS
+      
+      **Explicación:**
+      - La instancia RDS **{{dbinstanceidentifier.name}}** ({{engine.name}}) en la cuenta **{{aws_account.name}}** está experimentando un uso crítico de CPU con **{{value}}%**.
+      - Un uso de CPU superior al 85% puede causar degradación severa del rendimiento, queries lentas, timeouts y conexiones rechazadas.
+      
+      **Detalles:**
+      - INSTANCIA RDS: **{{dbinstanceidentifier.name}}**
+      - ENGINE: **{{engine.name}}**
+      - CUENTA AWS: **{{aws_account.name}}**
+      - AMBIENTE: **{{env.name}}**
+      - CPU UTILIZATION: **{{value}}%**
+      - UMBRAL CRÍTICO: > 85%
+      
+      **Impacto:**
+      - ⚠️ Queries ejecutándose más lento de lo normal
+      - ⚠️ Posibles timeouts en aplicaciones
+      - ⚠️ Conexiones pueden ser rechazadas
+      - ⚠️ Degradación general del rendimiento
+      - ⚠️ Riesgo de caída del servicio si llega a 100%
+      
+      **Validación Inmediata:**
+      
+      1. **Verificar métricas de CPU en CloudWatch:**
+         ```bash
+         aws cloudwatch get-metric-statistics \
+           --namespace AWS/RDS \
+           --metric-name CPUUtilization \
+           --dimensions Name=DBInstanceIdentifier,Value={{dbinstanceidentifier.name}} \
+           --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+           --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+           --period 300 \
+           --statistics Average,Maximum
+         ```
+      
+      2. **Identificar queries activas (PostgreSQL):**
+         ```sql
+         SELECT pid, usename, application_name, client_addr, state, 
+                query_start, state_change, wait_event_type, wait_event, query
+         FROM pg_stat_activity
+         WHERE state != 'idle'
+         ORDER BY query_start;
+         ```
+      
+      3. **Identificar queries activas (MySQL):**
+         ```sql
+         SHOW FULL PROCESSLIST;
+         ```
+      
+      4. **Verificar conexiones activas:**
+         ```sql
+         -- PostgreSQL
+         SELECT count(*) FROM pg_stat_activity;
+         
+         -- MySQL
+         SHOW STATUS LIKE 'Threads_connected';
+         ```
+      
+      5. **Revisar Performance Insights en AWS Console:**
+         - AWS Console → RDS → {{dbinstanceidentifier.name}} → Monitoring → Performance Insights
+      
+      **Posibles Causas:**
+      
+      **Queries Problemáticas:**
+      - 🐌 Queries sin optimizar (full table scans)
+      - 📊 Falta de índices apropiados
+      - 🔄 Queries con JOINs complejos sin optimizar
+      - 📈 Queries con agregaciones pesadas (GROUP BY, COUNT, SUM)
+      - 🔁 Queries en loop desde la aplicación
+      
+      **Carga de Trabajo:**
+      - 📈 Aumento inesperado de tráfico
+      - 🔄 Procesos batch ejecutándose en horario pico
+      - 💾 Operaciones de mantenimiento (VACUUM, ANALYZE)
+      - 🔄 Replicación con lag alto
+      
+      **Configuración:**
+      - 🖥️ Instance type insuficiente para la carga
+      - 🔧 Parámetros de configuración no optimizados
+      - 💾 Falta de memoria causando más uso de CPU
+      - 🔗 Demasiadas conexiones concurrentes
+      
+      **Acciones Recomendadas:**
+      
+      **Inmediato (Mitigación):**
+      1. ✅ Identificar y terminar queries problemáticas si es seguro hacerlo
+      2. ✅ Verificar si hay procesos batch que puedan pausarse
+      3. ✅ Revisar si hay conexiones idle que puedan cerrarse
+      4. ✅ Considerar escalar verticalmente (upgrade instance type) si es crítico
+      
+      **Corto Plazo (Optimización):**
+      1. 🔍 Analizar queries lentas usando slow query log
+      2. 📊 Identificar tablas sin índices apropiados
+      3. 🔧 Optimizar queries problemáticas
+      4. 📈 Implementar connection pooling en aplicación
+      5. ⏰ Reprogramar procesos batch fuera de horario pico
+      
+      **Largo Plazo (Prevención):**
+      1. 📊 Implementar monitoreo de queries lentas
+      2. 🔍 Realizar auditorías periódicas de performance
+      3. 📈 Planificar escalamiento basado en tendencias
+      4. 🔧 Implementar caching (Redis, Memcached)
+      5. 🏗️ Considerar read replicas para distribuir carga de lectura
+      6. 📊 Implementar particionamiento de tablas grandes
+      
+      **Comandos Útiles:**
+      
+      **Terminar query problemática (PostgreSQL):**
+      ```sql
+      SELECT pg_terminate_backend(pid) 
+      FROM pg_stat_activity 
+      WHERE pid = <PID>;
+      ```
+      
+      **Terminar query problemática (MySQL):**
+      ```sql
+      KILL <PROCESS_ID>;
+      ```
+      
+      **Ver queries más lentas (PostgreSQL con pg_stat_statements):**
+      ```sql
+      SELECT query, calls, total_exec_time, mean_exec_time, max_exec_time
+      FROM pg_stat_statements
+      ORDER BY mean_exec_time DESC
+      LIMIT 10;
+      ```
+      {{/is_alert}}
+      
+      {{#is_warning}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+   
+   
+    EOT
+    
+    thresholds = {
+      critical = 85  # 85% de uso de CPU
+      warning  = 70  # 70% de uso de CPU
+    }
+    
+    renotify_interval   = 30  # Re-notificar cada 30 minutos
+    require_full_window = false
+    priority            = 1
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:rds",
+      "severity:critical",
+      "metric:cpu",
+      "team:database",
+      "issue:performance"
+    ]
+  }
+  
+  # ============================================================================
+  # Monitors de EKS - Nodos
+  # ============================================================================
+  
+  # Monitor de memoria de nodos EKS
+  "eks-nodes-memory" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "query alert"
+    query = "avg(last_5m):1 - max:system.mem.pct_usable{kube_node:*,env:*} by {kube_node,eks_cluster-name,env,aws_account} > 0.85"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      **Explicación:**
+      - Significa que el servicio **AWS EKS** en el nodo **{{kube_node.name}}** de la cuenta **{{aws_account.name}}**, está presentando un aumento crítico en el consumo de **Memory** con un valor mayor al **85%**.
+      
+      **Validación**
+      - Verificar el consumo de Memory de los nodes
+      - CUENTA AWS: **{{aws_account.name}}**
+      - CLUSTER NAME: **{{eks_cluster-name.name}}**
+      - NODE: **{{kube_node.name}}**
+      - AMBIENTE: **{{env.name}}**
+      {{/is_alert}}
+      
+      {{#is_warning}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ⚠️ **WARNING**: El nodo **{{kube_node.name}}** está alcanzando el **60%** de uso de memoria.
+      
+      - CUENTA AWS: **{{aws_account.name}}**
+      - CLUSTER NAME: **{{eks_cluster-name.name}}**
+      - NODE: **{{kube_node.name}}**
+      - AMBIENTE: **{{env.name}}**
+      {{/is_warning}}
+      
+      {{#is_recovery}}
+      ✅ **RECOVERED**: El nodo **{{kube_node.name}}** ha vuelto a niveles normales de memoria.
+      {{/is_recovery}}
+    EOT
+    
+    thresholds = {
+      critical = 0.85  # 85% de uso de memoria
+      warning  = 0.6   # 60% de uso de memoria
+    }
+    
+    renotify_interval   = 0
+    require_full_window = false
+    priority            = 1
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:eks",
+      "severity:critical",
+      "metric:memory",
+      "team:infrastructure",
+      "resource:nodes"
+    ]
+  }
+  
+  # Monitor de CPU de nodos EKS
+  "eks-nodes-cpu" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "query alert"
+    query = "avg(last_5m):avg:system.cpu.user{kube_node:*,env:*} by {kube_node,eks_cluster-name,env,aws_account} > 85"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      **Explicación:**
+      - Significa que el servicio **AWS EKS** en el nodo **{{kube_node.name}}** de la cuenta **{{aws_account.name}}**, está presentando un aumento crítico en el consumo de **CPU** con un valor mayor al **85%**.
+      
+      **Validación**
+      - Verificar el consumo de CPU de los nodes
+      - CUENTA AWS: **{{aws_account.name}}**
+      - CLUSTER NAME: **{{eks_cluster-name.name}}**
+      - NODE: **{{kube_node.name}}**
+      - AMBIENTE: **{{env.name}}**
+      {{/is_alert}}
+      
+      {{#is_warning}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ⚠️ **WARNING**: El nodo **{{kube_node.name}}** está alcanzando el **70%** de uso de CPU.
+      
+      - CUENTA AWS: **{{aws_account.name}}**
+      - CLUSTER NAME: **{{eks_cluster-name.name}}**
+      - NODE: **{{kube_node.name}}**
+      - AMBIENTE: **{{env.name}}**
+      {{/is_warning}}
+      
+      {{#is_recovery}}
+      ✅ **RECOVERED**: El nodo **{{kube_node.name}}** ha vuelto a niveles normales de CPU.
+      {{/is_recovery}}
+    EOT
+    
+    thresholds = {
+      critical = 85  # 85% de uso de CPU
+      warning  = 70  # 70% de uso de CPU
+    }
+    
+    renotify_interval   = 0
+    require_full_window = false
+    priority            = 1
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:eks",
+      "severity:critical",
+      "metric:cpu",
+      "team:infrastructure",
+      "resource:nodes"
+    ]
+  }
+  
+  # ============================================================================
+  # Monitors de EKS - Pods
+  # ============================================================================
+  
+  # Monitor de pods en CrashLoopBackOff
+  "eks-pods-crashloop" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "query alert"
+    query = "max(last_5m):max:kubernetes_state.container.status_report.count.waiting{reason:crashloopbackoff,env:*} by {kube_namespace,pod_name,eks_cluster-name,env,aws_account} > 0"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      **Explicación:**
+      - El pod **{{pod_name.name}}** en el namespace **{{kube_namespace.name}}** está en estado **CrashLoopBackOff**, lo que significa que está fallando repetidamente al iniciar.
+      
+      **Validación**
+      - Verificar los logs del pod: `kubectl logs {{pod_name.name}} -n {{kube_namespace.name}}`
+      - Verificar eventos del pod: `kubectl describe pod {{pod_name.name}} -n {{kube_namespace.name}}`
+      - Verificar configuración del deployment
+      
+      **Detalles:**
+      - CUENTA AWS: **{{aws_account.name}}**
+      - CLUSTER NAME: **{{eks_cluster-name.name}}**
+      - NAMESPACE: **{{kube_namespace.name}}**
+      - POD: **{{pod_name.name}}**
+      - AMBIENTE: **{{env.name}}**
+      
+      **Posibles Causas:**
+      - Error en la aplicación
+      - Configuración incorrecta (variables de entorno, secrets, configmaps)
+      - Recursos insuficientes (CPU/Memory limits)
+      - Dependencias no disponibles (bases de datos, servicios externos)
+      - Imagen de contenedor incorrecta o corrupta
+      {{/is_alert}}
+      
+      {{#is_recovery}}
+      ✅ **RECOVERED**: El pod **{{pod_name.name}}** en el namespace **{{kube_namespace.name}}** ha vuelto a estado normal.
+      {{/is_recovery}}
+    EOT
+    
+    thresholds = {
+      critical = 0  # Cualquier pod en CrashLoopBackOff es crítico
+    }
+    
+    renotify_interval   = 30  # Re-notificar cada 30 minutos si persiste
+    require_full_window = false
+    priority            = 1
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:eks",
+      "severity:critical",
+      "metric:pod-status",
+      "team:infrastructure",
+      "resource:pods",
+      "issue:crashloop"
+    ]
+  }
+  
+  # ============================================================================
+  # Monitors de API Gateway
+  # ============================================================================
+  
+  # Monitor de errores 5xx en API Gateway
+  "apigateway-5xx-errors" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "metric alert"
+    query = "sum(last_5m):sum:aws.apigateway.5xxerror{apiname:*,env:*} by {apiname,stage,env,aws_account}.as_count() > 10"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      🚨 **CRÍTICO**: Errores 5xx en API Gateway
+      
+      **Explicación:**
+      - El API Gateway **{{apiname.name}}** en el stage **{{stage.name}}** está generando errores 5xx (errores del servidor), con un total de **{{value}}** errores en los últimos 5 minutos.
+      - Los errores 5xx indican problemas en el backend (Lambda, integraciones) o en la configuración del API Gateway.
+      
+      **Detalles:**
+      - API NAME: **{{apiname.name}}**
+      - STAGE: **{{stage.name}}**
+      - CUENTA AWS: **{{aws_account.name}}**
+      - AMBIENTE: **{{env.name}}**
+      - ERRORES 5xx: **{{value}}** en 5 minutos
+      
+      **Impacto:**
+      - ⚠️ Usuarios recibiendo errores del servidor
+      - ⚠️ Funcionalidad de la API comprometida
+      - ⚠️ Posible pérdida de transacciones
+      - ⚠️ Experiencia de usuario degradada
+      
+      **Tipos de Errores 5xx:**
+      - **500 Internal Server Error**: Error en Lambda o backend
+      - **502 Bad Gateway**: Lambda devolvió respuesta mal formada
+      - **503 Service Unavailable**: Servicio no disponible
+      - **504 Gateway Timeout**: Lambda excedió 29 segundos
+      
+      **Validación Inmediata:**
+      1. Verificar logs de API Gateway: `aws logs tail /aws/apigateway/{{apiname.name}} --follow --filter-pattern "5??"`
+      2. Verificar errores de Lambda asociadas
+      3. Revisar métricas en Datadog para identificar endpoints específicos
+      4. Verificar estado de integraciones backend
+      
+      **Posibles Causas:**
+      - **500**: Error no manejado en Lambda, problema con dependencias (DB, APIs externas)
+      - **502**: Lambda devolvió formato de respuesta incorrecto, falta de headers requeridos
+      - **503**: Lambda throttled, servicio backend no disponible
+      - **504**: Lambda excedió 29 segundos, operaciones muy lentas
+      
+      **Acciones Recomendadas:**
+      1. Identificar el tipo específico de error 5xx
+      2. Revisar logs de Lambda para stack traces
+      3. Verificar si hay throttling en Lambda
+      4. Verificar conectividad con servicios backend
+      5. Implementar mejor manejo de errores
+      {{/is_alert}}
+      
+      {{#is_warning}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ⚠️ **WARNING**: Errores 5xx detectados en API Gateway
+      
+      - API NAME: **{{apiname.name}}**
+      - STAGE: **{{stage.name}}**
+      - ERRORES 5xx: **{{value}}**
+      
+      Monitorear de cerca y revisar logs si persiste.
+      {{/is_warning}}
+      
+      {{#is_recovery}}
+      ✅ **RECOVERED**: El API Gateway **{{apiname.name}}** en el stage **{{stage.name}}** ha vuelto a niveles normales de errores.
+      {{/is_recovery}}
+    EOT
+    
+    thresholds = {
+      critical = 10  # Más de 10 errores 5xx en 5 minutos
+      warning  = 5   # Más de 5 errores 5xx en 5 minutos
+    }
+    
+    renotify_interval   = 30  # Re-notificar cada 30 minutos
+    require_full_window = false
+    priority            = 1
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:apigateway",
+      "severity:critical",
+      "metric:5xx-errors",
+      "team:backend",
+      "issue:server-error"
+    ]
+  }
+  
+  # Monitor de errores 4xx en API Gateway
+  "apigateway-4xx-errors" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "metric alert"
+    query = "sum(last_5m):sum:aws.apigateway.4xxerror{apiname:*,env:*} by {apiname,stage,env,aws_account}.as_count() > 50"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      ⚠️ **ALERTA**: Alto número de errores 4xx en API Gateway
+      
+      **Explicación:**
+      - El API Gateway **{{apiname.name}}** en el stage **{{stage.name}}** está generando errores 4xx (errores del cliente), con un total de **{{value}}** errores en los últimos 5 minutos.
+      - Los errores 4xx indican problemas con las peticiones de los clientes o problemas de autenticación/autorización.
+      
+      **Detalles:**
+      - API NAME: **{{apiname.name}}**
+      - STAGE: **{{stage.name}}**
+      - CUENTA AWS: **{{aws_account.name}}**
+      - AMBIENTE: **{{env.name}}**
+      - ERRORES 4xx: **{{value}}** en 5 minutos
+      
+      **Tipos de Errores 4xx:**
+      - **400 Bad Request**: Petición mal formada, parámetros inválidos
+      - **401 Unauthorized**: Falta de autenticación o token inválido
+      - **403 Forbidden**: Sin permisos para acceder al recurso
+      - **404 Not Found**: Endpoint no existe
+      - **429 Too Many Requests**: Rate limiting activado
+      
+      **Validación:**
+      1. Verificar logs de API Gateway: `aws logs tail /aws/apigateway/{{apiname.name}} --follow --filter-pattern "4??"`
+      2. Identificar el tipo específico de error 4xx más común
+      3. Revisar endpoints afectados
+      4. Verificar si es un patrón de ataque o error legítimo
+      
+      **Posibles Causas:**
+      - **400**: Validación de input fallando, cambios en el contrato de API
+      - **401**: Tokens expirados, problemas con autenticación
+      - **403**: Problemas con autorización, WAF bloqueando requests
+      - **404**: Clientes usando endpoints deprecados o URLs incorrectas
+      - **429**: Límites de rate limiting alcanzados, posible ataque
+      
+      **Acciones:**
+      1. Si son 429: Verificar si es tráfico legítimo o ataque
+      2. Si son 401/403: Revisar configuración de autenticación
+      3. Si son 400: Revisar cambios recientes en validaciones
+      4. Si son 404: Comunicar endpoints correctos a clientes
+      {{/is_alert}}
+      
+      {{#is_warning}}
+      ⚠️ **WARNING**: Incremento de errores 4xx en **{{apiname.name}}** stage **{{stage.name}}**: **{{value}}** errores.
+      {{/is_warning}}
+      
+      {{#is_recovery}}
+      ✅ **RECOVERED**: El API Gateway **{{apiname.name}}** ha vuelto a niveles normales de errores 4xx.
+      {{/is_recovery}}
+    EOT
+    
+    thresholds = {
+      critical = 50  # Más de 50 errores 4xx en 5 minutos
+      warning  = 30  # Más de 30 errores 4xx en 5 minutos
+    }
+    
+    renotify_interval   = 60  # Re-notificar cada 60 minutos
+    require_full_window = false
+    priority            = 2
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:apigateway",
+      "severity:high",
+      "metric:4xx-errors",
+      "team:backend",
+      "issue:client-error"
+    ]
+  }
+  
+  # Monitor de latencia alta en API Gateway
+  "apigateway-high-latency" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "metric alert"
+    query = "avg(last_5m):p99:aws.apigateway.latency{apiname:*,env:*} by {apiname,stage,env,aws_account} > 3000"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      🐌 **CRÍTICO**: Latencia alta en API Gateway
+      
+      **Explicación:**
+      - El API Gateway **{{apiname.name}}** en el stage **{{stage.name}}** está experimentando latencia alta en el percentil 99 (P99) con **{{value}}ms**.
+      - Esto significa que el 1% de las peticiones más lentas están tardando más de {{value}}ms, afectando la experiencia de usuario.
+      
+      **Detalles:**
+      - API NAME: **{{apiname.name}}**
+      - STAGE: **{{stage.name}}**
+      - CUENTA AWS: **{{aws_account.name}}**
+      - AMBIENTE: **{{env.name}}**
+      - LATENCIA P99: **{{value}}ms**
+      - UMBRAL CRÍTICO: > 3000ms (3 segundos)
+      
+      **Impacto:**
+      - ⚠️ Experiencia de usuario degradada
+      - ⚠️ Posibles timeouts en clientes
+      - ⚠️ Aumento de costos por ejecuciones largas
+      - ⚠️ Riesgo de timeout en API Gateway (29s)
+      
+      **Validación:**
+      1. Verificar latencia de Lambda backend:
+         ```
+         aws cloudwatch get-metric-statistics \
+           --namespace AWS/Lambda \
+           --metric-name Duration \
+           --statistics Average,Maximum
+         ```
+      2. Revisar métricas de latencia por endpoint en Datadog
+      3. Verificar si hay cold starts frecuentes
+      4. Revisar logs de X-Ray para identificar cuellos de botella
+      
+      **Posibles Causas:**
+      - 🐌 Lambda con ejecuciones lentas (queries DB, APIs externas)
+      - ❄️ Cold starts frecuentes
+      - 🔗 Integraciones externas lentas
+      - 💾 Consultas a base de datos sin optimizar
+      - 🌐 Latencia de red alta
+      - 🧠 Lambda con poca memoria asignada
+      - 📦 Payload grande en request/response
+      
+      **Acciones Recomendadas:**
+      
+      **Inmediato:**
+      1. Identificar endpoints específicos con alta latencia
+      2. Revisar logs de Lambda para operaciones lentas
+      3. Verificar estado de servicios backend (DB, APIs)
+      
+      **Corto Plazo:**
+      1. Optimizar queries de base de datos
+      2. Implementar caching (API Gateway cache, Redis)
+      3. Aumentar memoria de Lambda (más memoria = más CPU)
+      4. Implementar timeouts en llamadas externas
+      5. Reducir tamaño de payloads
+      
+      **Largo Plazo:**
+      1. Implementar provisioned concurrency para evitar cold starts
+      2. Refactorizar código ineficiente
+      3. Implementar CDN para contenido estático
+      4. Considerar arquitectura asíncrona para operaciones largas
+      5. Implementar connection pooling para DB
+      {{/is_alert}}
+      
+      {{#is_warning}}
+      ⚠️ **WARNING**: Latencia elevada en **{{apiname.name}}** stage **{{stage.name}}**: **{{value}}ms** (P99).
+      {{/is_warning}}
+      
+      {{#is_recovery}}
+      ✅ **RECOVERED**: La latencia del API Gateway **{{apiname.name}}** ha vuelto a niveles normales.
+      {{/is_recovery}}
+    EOT
+    
+    thresholds = {
+      critical = 3000  # P99 > 3 segundos
+      warning  = 2000  # P99 > 2 segundos
+    }
+    
+    renotify_interval   = 30
+    require_full_window = false
+    priority            = 1
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:apigateway",
+      "severity:critical",
+      "metric:latency",
+      "team:backend",
+      "issue:performance"
+    ]
+  }
+  
+  # Monitor de anomalías en request count de API Gateway
+  "apigateway-request-anomaly" = {
+    name = ""  # Se llenará automáticamente en locals.tf
+    
+    type  = "query alert"
+    query = "avg(last_4h):anomalies(sum:aws.apigateway.count{apiname:*,env:*} by {apiname,stage,env,aws_account}, 'agile', 2, direction='both', interval=60, alert_window='last_15m', count_default_zero='true') >= 1"
+    
+    message = <<-EOT
+      {{#is_alert}}
+      @slack-aws-alarms-pragma-proyectos-internos
+      
+      ---
+      
+      🔍 **ANOMALÍA DETECTADA**: Tráfico anormal en API Gateway
+      
+      **Explicación:**
+      - El API Gateway **{{apiname.name}}** en el stage **{{stage.name}}** está mostrando un patrón de tráfico anormal comparado con su comportamiento histórico.
+      
+      **Detalles:**
+      - API NAME: **{{apiname.name}}**
+      - STAGE: **{{stage.name}}**
+      - CUENTA AWS: **{{aws_account.name}}**
+      - AMBIENTE: **{{env.name}}**
+      - PATRÓN: Basado en últimas 4 horas
+      
+      **Posibles Escenarios:**
+      
+      **Pico de Tráfico (Aumento Anormal):**
+      - ✅ Campaña de marketing exitosa
+      - ✅ Feature nuevo con alta adopción
+      - ⚠️ Ataque DDoS o abuso
+      - ⚠️ Loop infinito en cliente
+      - ⚠️ Retry excesivo por errores
+      
+      **Caída de Tráfico (Disminución Anormal):**
+      - ⚠️ Problema en clientes o aplicaciones frontend
+      - ⚠️ Problema de DNS o conectividad
+      - ⚠️ Cambio no planificado en routing
+      - ⚠️ Servicio upstream caído
+      
+      **Validación:**
+      1. Verificar métricas de request count en Datadog
+      2. Revisar si hay errores correlacionados (5xx, 4xx)
+      3. Verificar logs de acceso de API Gateway
+      4. Revisar si hay cambios recientes en la aplicación
+      5. Verificar estado de servicios upstream
+      
+      **Acciones:**
+      1. Determinar si el cambio es esperado o anómalo
+      2. Si es pico: Verificar si hay throttling o errores
+      3. Si es caída: Verificar conectividad y servicios upstream
+      4. Revisar logs para identificar patrón
+      5. Considerar ajustar rate limiting si es ataque
+      {{/is_alert}}
+      
+      {{#is_recovery}}
+      ✅ **RECUPERADO**: El tráfico del API Gateway **{{apiname.name}}** ha vuelto a patrones normales.
+      {{/is_recovery}}
+    EOT
+    
+    thresholds = {
+      critical = 1  # Cualquier anomalía detectada
+    }
+    
+    renotify_interval   = 0
+    require_full_window = false
+    priority            = 2
+    on_missing_data     = "default"
+    
+    additional_tags = [
+      "service:apigateway",
+      "severity:medium",
+      "metric:request-count",
+      "team:backend",
+      "issue:anomaly"
+    ]
+  }
+}
